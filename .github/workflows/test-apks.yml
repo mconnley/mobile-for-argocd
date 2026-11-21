@@ -1,0 +1,83 @@
+# Fork-only: builds an A/B pair of installable release APKs for emulator testing
+# of the user-CA trust fix. Not part of the upstream change.
+#
+#   baseline - upstream main, unmodified
+#   ca-fix   - this branch (plugins/withUserCaTrust.js)
+#
+# Each variant gets its own applicationId and label so both install side by
+# side, and neither collides with the store build. Signed with the template's
+# debug keystore, so no secrets are needed.
+name: Test APKs (A/B)
+
+on:
+  push:
+    branches: [ci/test-apks]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: baseline
+            suffix: baseline
+            label: Argo CD (baseline)
+          - variant: ca-fix
+            suffix: cafix
+            label: Argo CD (CA fix)
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'yarn'
+          cache-dependency-path: yarn.lock
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Revert to upstream main (baseline only)
+        if: matrix.variant == 'baseline'
+        run: |
+          git fetch --no-tags https://github.com/argoproj-labs/mobile-for-argocd.git main
+          git restore --source=FETCH_HEAD -- app.json
+          rm -rf plugins
+
+      - name: Set applicationId and label
+        run: |
+          jq --arg s "${{ matrix.suffix }}" --arg n "${{ matrix.label }}" \
+            '.expo.android.package += "." + $s | .expo.name = $n' app.json > app.json.tmp
+          mv app.json.tmp app.json
+          jq '.expo | {name, package: .android.package, plugins}' app.json
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Expo prebuild
+        run: npx expo prebuild --platform android --clean
+
+      - name: Show network security config
+        run: |
+          grep -o 'android:networkSecurityConfig="[^"]*"' android/app/src/main/AndroidManifest.xml || echo "no networkSecurityConfig"
+          find android/app/src -name network_security_config.xml -print -exec cat {} \;
+
+      - name: Build APK
+        run: |
+          cd android
+          ./gradlew assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: argocd-${{ matrix.variant }}-${{ github.sha }}
+          path: android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 14
